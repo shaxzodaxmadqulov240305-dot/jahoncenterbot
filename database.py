@@ -286,15 +286,16 @@ async def reset_attempt(user_id: int, test_id: int) -> bool:
         return cursor.rowcount > 0
 
 
-async def get_results(test_id: int) -> List[Tuple[str, int, int]]:
+async def get_results(test_id: int) -> List[Tuple[str, int, int, str]]:
     """
-    Reyting jadvali: [(ism, ball, user_id), ...] — balldan pastga qarab.
+    Reyting jadvali: [(ism, ball, user_id, topshirilgan_vaqti), ...] —
+    balldan pastga qarab, ball teng bo'lsa avvalroq topshirgan yuqorida.
     Har kim bir marta topshirgani uchun takrorlarni filtrlash shart emas.
     """
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
             """
-            SELECT first_name, score, user_id
+            SELECT first_name, score, user_id, created_at
             FROM results
             WHERE test_id = ?
             ORDER BY score DESC, created_at ASC

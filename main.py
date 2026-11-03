@@ -12,6 +12,7 @@ ADMIN UCHUN:
   /addtest  — test qo'shish
   /post     — kanalga tashlash uchun tayyor e'lon matni
   /results  — reyting jadvali
+  /excel    — natijalarni Excel (.xlsx) fayl qilib yuborish
   /finish   — testni yakunlash va umumiy hisobot
   /reopen   — yakunlangan testni qayta ochish
   /tests    — barcha testlar ro'yxati
@@ -27,6 +28,7 @@ import logging
 import os
 import re
 import sys
+import tempfile
 from typing import Optional
 
 from aiogram import Bot, Dispatcher, F, Router
@@ -38,6 +40,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
     CallbackQuery,
+    FSInputFile,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
@@ -359,6 +362,7 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
             "<code>/addtest</code> — test qo'shish\n"
             "<code>/post [kod]</code> — kanal uchun e'lon matni\n"
             "<code>/results [kod]</code> — reyting jadvali\n"
+            "<code>/excel [kod]</code> — natijalarni Excel fayl qilib olish\n"
             "<code>/finish [kod]</code> — testni yakunlash\n"
             "<code>/reopen [kod]</code> — qayta ochish\n"
             "<code>/tests</code> — barcha testlar\n"
@@ -680,11 +684,11 @@ async def build_rating(test: dict, limit: int | None = None) -> str:
     ]
 
     shown = results[:limit] if limit else results
-    for position, (first_name, score, _user_id) in enumerate(shown, start=1):
+    for position, (first_name, score, _user_id, _created_at) in enumerate(shown, start=1):
         percent = score / total * 100
         name = first_name if len(first_name) <= 28 else first_name[:27] + "…"
         lines.append(
-            f"{medal(position)} <b>{safe(name)}</b> — {score}/{total} ({percent:.0f}%)"
+            f"{position}. <b>{safe(name)}</b> — {score}/{total} ({percent:.0f}%)"
         )
 
     if limit and len(results) > limit:
@@ -727,6 +731,94 @@ async def cmd_results(message: Message, command: CommandObject) -> None:
         return
 
     await send_long(message, await build_rating(test))
+
+
+@router.message(Command("excel"), IsAdmin())
+async def cmd_excel(message: Message, command: CommandObject) -> None:
+    """
+    /excel [kod] — test natijalarini Excel (.xlsx) fayl qilib, jadval
+    ko'rinishida yuboradi (№, F.I.Sh, To'g'ri javoblar, Foiz, Topshirilgan vaqti).
+    Ball teng bo'lsa, avvalroq topshirgan o'quvchi yuqorida turadi.
+    """
+    if not command.args or not command.args.strip().isdigit():
+        await message.answer("❌ Format: <code>/excel 105</code>")
+        return
+
+    test_id = int(command.args.strip())
+    test = await db.get_test(test_id)
+
+    if test is None:
+        await message.answer(f"❌ <code>{test_id}</code> kodli test topilmadi.")
+        return
+
+    results = await db.get_results(test_id)
+
+    if not results:
+        await message.answer(
+            f"📭 <b>{safe(test['title'])}</b> testini hozircha hech kim topshirmagan."
+        )
+        return
+
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Alignment, Font, PatternFill
+        from openpyxl.utils import get_column_letter
+    except ImportError:
+        await message.answer(
+            "⚠️ Excel fayl yaratish uchun <code>openpyxl</code> kutubxonasi kerak.\n\n"
+            "O'rnating: <code>pip install openpyxl</code>\n"
+            "(Anaconda Prompt yoki Spyder konsolida <code>!pip install openpyxl</code>)"
+        )
+        return
+
+    total = len(test["correct_answers"])
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = f"Test {test_id}"[:31]  # Excel varaq nomi 31 belgidan oshmasin
+
+    headers = ["№", "F.I.Sh", "To'g'ri javoblar", "Foiz (%)", "Topshirilgan vaqti"]
+    ws.append(headers)
+
+    header_font = Font(bold=True, color="FFFFFF")
+    header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+    center = Alignment(horizontal="center")
+
+    for col_idx in range(1, len(headers) + 1):
+        cell = ws.cell(row=1, column=col_idx)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = center
+
+    # Natijalar allaqachon "ball DESC, topshirilgan vaqt ASC" bo'yicha
+    # saralangan holda keladi (database.py), ya'ni ball teng bo'lsa
+    # avvalroq topshirgan o'quvchi tepada turadi.
+    for position, (first_name, score, _user_id, submitted_at) in enumerate(results, start=1):
+        score = int(score) if score is not None else 0
+        percent = round(score / total * 100, 1) if total else 0
+        ws.append([position, first_name, score, percent, submitted_at or ""])
+        for col_idx in (1, 3, 4, 5):
+            ws.cell(row=position + 1, column=col_idx).alignment = center
+
+    widths = [5, 34, 16, 10, 18]
+    for col_idx, width in enumerate(widths, start=1):
+        ws.column_dimensions[get_column_letter(col_idx)].width = width
+
+    ws.freeze_panes = "A2"
+
+    safe_title = re.sub(r"[^\w\-]+", "_", test["title"]).strip("_") or "test"
+    file_name = f"{test_id}_{safe_title}_natijalar.xlsx"
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        file_path = os.path.join(tmp_dir, file_name)
+        wb.save(file_path)
+        await message.answer_document(
+            FSInputFile(file_path, filename=file_name),
+            caption=(
+                f"📊 <b>{safe(test['title'])}</b> — natijalar jadvali\n"
+                f"👥 Ishtirokchilar: <b>{len(results)}</b> ta"
+            ),
+        )
 
 
 @router.message(Command("finish"), IsAdmin())
@@ -779,7 +871,8 @@ async def cmd_finish(message: Message, command: CommandObject) -> None:
     if stats["participants"]:
         await send_long(message, await build_rating(test, limit=10))
         await message.answer(
-            f"To'liq ro'yxat: <code>/results {test_id}</code>"
+            f"To'liq ro'yxat: <code>/results {test_id}</code>\n"
+            f"Excel fayl: <code>/excel {test_id}</code>"
         )
 
 
@@ -1071,11 +1164,8 @@ async def grade_answers(
         f"📋 Test: <b>{safe(test['title'])}</b> (kod: {test_id})\n"
         "➖➖➖➖➖➖➖➖➖➖➖\n"
         f"🎯 To'g'ri javoblar: <b>{score}</b> / {total}\n"
-        f"❌ Xato javoblar: <b>{total - score}</b> ta\n"
         f"📊 Foiz: <b>{percent:.1f}%</b>\n\n"
         f"{verdict}\n\n"
-        "❌ <b>Xato belgilangan savollar:</b>\n"
-        f"{format_wrong_list(wrong_numbers)}\n\n"
         "ℹ️ Natijangiz saqlandi. Bu testni qayta topshirib bo'lmaydi."
     )
 
@@ -1275,6 +1365,8 @@ async def main() -> None:
     # Bot qayta ishga tushganda holatlar tozalanadi (bu normal holat).
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(router)
+
+    await bot.delete_webhook(drop_pending_updates=True)
 
     # Render.com bepul Web Service uchun port tinglash (health-check)
     render_port = os.getenv("PORT")
