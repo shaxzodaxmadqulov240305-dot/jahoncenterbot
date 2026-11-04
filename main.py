@@ -1366,7 +1366,7 @@ async def main() -> None:
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(router)
 
-    await bot.delete_webhook(drop_pending_updates=True)
+
 
     # Render.com bepul Web Service uchun port tinglash (health-check)
     render_port = os.getenv("PORT")
@@ -1385,6 +1385,8 @@ async def main() -> None:
         site = web.TCPSite(runner, "0.0.0.0", int(render_port))
         await site.start()
         logging.info(f"Render health-check serveri {render_port}-portda ishga tushdi.")
+
+    await bot.delete_webhook(drop_pending_updates=True)
 
     logging.info("Bot ishga tushdi. To'xtatish uchun: Ctrl+C")
     try:
